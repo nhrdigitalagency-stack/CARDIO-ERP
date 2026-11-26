@@ -16,8 +16,8 @@ import {
   requirePermission,
   requireSupabaseConfigured,
 } from '../middleware/auth';
-import { CLINIC_DEFAULTS, EXAMINATION_TYPE_LABELS } from '../../src/shared/constants';
-import type { ExaminationType } from '../../src/shared/types';
+import { APPOINTMENT_TYPE_LABELS, CLINIC_DEFAULTS, EXAMINATION_TYPE_LABELS } from '../../src/shared/constants';
+import type { AppointmentType, ExaminationType } from '../../src/shared/types';
 import { emitSyncEvent } from '../services/eventBus';
 import { invalidateClinicMetaCache } from '../services/ogMeta';
 
@@ -530,22 +530,114 @@ financeRouter.get('/dashboard', async (req, res) => {
     .filter((p) => p.status !== 'ANNULE')
     .reduce((acc, p) => acc + p.remainingBalanceFcfa, 0);
 
+  // Real-time today patient flow & appointment breakdown from Supabase
+  const sortedTodayAppts = [...todayAppts].sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const todayNonCancelled = sortedTodayAppts.filter((a) => a.status !== 'ANNULE');
+  const todayConfirmed = sortedTodayAppts.filter((a) => a.status === 'CONFIRME');
+  const todayUnconfirmed = sortedTodayAppts.filter((a) => a.status === 'EN_ATTENTE');
+  const todayArrived = sortedTodayAppts.filter((a) => a.status === 'PATIENT_ARRIVE');
+  const todayWaitingConsult = sortedTodayAppts.filter((a) => a.status === 'EN_ATTENTE_CONSULTATION');
+  const todayInConsult = sortedTodayAppts.filter((a) => a.status === 'EN_CONSULTATION');
+  const todayCompleted = sortedTodayAppts.filter((a) => a.status === 'TERMINE');
+  const todayAbsent = sortedTodayAppts.filter((a) => a.status === 'ABSENT');
+  const todayCancelled = sortedTodayAppts.filter((a) => a.status === 'ANNULE');
+
+  const todayUrgentCount = todayNonCancelled.filter(
+    (a) =>
+      (a.adminPriority === 'URGENCE_A_VALIDER' || a.adminPriority === 'PRIORITAIRE') &&
+      a.status !== 'TERMINE' &&
+      a.status !== 'ABSENT'
+  ).length;
+
+  const totalScheduledToday = todayNonCancelled.length;
+  const presentTodayCount =
+    todayArrived.length + todayWaitingConsult.length + todayInConsult.length + todayCompleted.length;
+  const completionRateToday = totalScheduledToday
+    ? Math.round((todayCompleted.length / totalScheduledToday) * 100)
+    : 0;
+  const attendanceRateToday = totalScheduledToday
+    ? Math.round((presentTodayCount / totalScheduledToday) * 100)
+    : 0;
+
+  // Real average waiting time (in minutes) computed strictly from recorded arrivedAt / consultationStartedAt timestamps
+  const nowMs = Date.now();
+  const waitSamplesMin: number[] = [];
+  for (const a of sortedTodayAppts) {
+    if (!a.arrivedAt) continue;
+    const arrMs = new Date(a.arrivedAt).getTime();
+    if (!Number.isFinite(arrMs)) continue;
+    if (a.status === 'PATIENT_ARRIVE' || a.status === 'EN_ATTENTE_CONSULTATION') {
+      const diff = Math.max(0, Math.round((nowMs - arrMs) / 60000));
+      if (diff <= 720) waitSamplesMin.push(diff);
+    } else if (a.status === 'EN_CONSULTATION' || a.status === 'TERMINE') {
+      const endRef = a.consultationStartedAt || a.updatedAt;
+      const endMs = endRef ? new Date(endRef).getTime() : NaN;
+      if (Number.isFinite(endMs) && endMs >= arrMs) {
+        const diff = Math.round((endMs - arrMs) / 60000);
+        if (diff <= 720) waitSamplesMin.push(diff);
+      }
+    }
+  }
+  const avgWaitMinutes = waitSamplesMin.length
+    ? Math.round(waitSamplesMin.reduce((sum, v) => sum + v, 0) / waitSamplesMin.length)
+    : null;
+
+  // Hourly patient flow distribution (08h-18h + any edge appointment hour)
+  const hourBuckets = new Map<number, { total: number; completed: number; active: number; remaining: number }>();
+  for (let h = 8; h <= 18; h++) {
+    hourBuckets.set(h, { total: 0, completed: 0, active: 0, remaining: 0 });
+  }
+  for (const a of todayNonCancelled) {
+    const parsedHour = Number.parseInt((a.startTime || '09:00').slice(0, 2), 10);
+    const h = Number.isFinite(parsedHour) ? Math.min(23, Math.max(0, parsedHour)) : 9;
+    const bucket = hourBuckets.get(h) || { total: 0, completed: 0, active: 0, remaining: 0 };
+    bucket.total += 1;
+    if (a.status === 'TERMINE') {
+      bucket.completed += 1;
+    } else if (
+      a.status === 'PATIENT_ARRIVE' ||
+      a.status === 'EN_ATTENTE_CONSULTATION' ||
+      a.status === 'EN_CONSULTATION'
+    ) {
+      bucket.active += 1;
+    } else if (a.status === 'CONFIRME' || a.status === 'EN_ATTENTE') {
+      bucket.remaining += 1;
+    }
+    hourBuckets.set(h, bucket);
+  }
+  const hourlyBreakdown = Array.from(hourBuckets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([h, stats]) => ({
+      hour: `${String(h).padStart(2, '0')}h`,
+      ...stats,
+    }));
+
+  const todayByTypeMap = new Map<string, { type: string; label: string; count: number }>();
+  for (const a of todayNonCancelled) {
+    const label = APPOINTMENT_TYPE_LABELS[a.type as AppointmentType] || a.type;
+    const current = todayByTypeMap.get(a.type) || { type: a.type, label, count: 0 };
+    current.count += 1;
+    todayByTypeMap.set(a.type, current);
+  }
+  const todayByType = Array.from(todayByTypeMap.values()).sort((a, b) => b.count - a.count);
+
   return res.json({
     today,
+    syncedAt: new Date().toISOString(),
     primaryRole: isMedecin ? 'MEDECIN' : isAdmin ? 'ADMIN' : 'ACCUEIL',
     metrics: {
       totalPatients: activePatients.length,
       newPatientsThisMonth: newPatientsThisMonth.length,
       consultationsToday: visibleConsultations.filter((c) => c.date === today).length,
       totalConsultations: visibleConsultations.length,
-      appointmentsToday: todayAppts.filter((a) => a.status !== 'ANNULE').length,
+      appointmentsToday: totalScheduledToday,
       totalAppointments: nonCancelledAppts.length,
-      patientsArrived: todayAppts.filter((a) => a.status === 'PATIENT_ARRIVE').length,
-      patientsWaiting: todayAppts.filter((a) => a.status === 'PATIENT_ARRIVE' || a.status === 'EN_ATTENTE_CONSULTATION').length,
-      patientsInConsultation: todayAppts.filter((a) => a.status === 'EN_CONSULTATION').length,
-      appointmentsConfirmed: todayAppts.filter((a) => a.status === 'CONFIRME').length,
-      appointmentsUnconfirmed: todayAppts.filter((a) => a.status === 'EN_ATTENTE').length,
-      appointmentsAbsent: todayAppts.filter((a) => a.status === 'ABSENT').length,
+      patientsArrived: todayArrived.length,
+      patientsWaiting: todayArrived.length + todayWaitingConsult.length,
+      patientsInConsultation: todayInConsult.length,
+      appointmentsConfirmed: todayConfirmed.length,
+      appointmentsUnconfirmed: todayUnconfirmed.length,
+      appointmentsAbsent: todayAbsent.length,
       patientRequests: appointments.filter((a) => a.requestedByPatient && a.status === 'EN_ATTENTE').length,
       examsToInterpret: examinations.filter((e) => e.status === 'A_INTERPRETER' || e.status === 'RESULTAT_DISPONIBLE').length,
       examsPerformed: examinations.filter((e) => ['REALISE', 'RESULTAT_DISPONIBLE', 'A_INTERPRETER', 'VALIDE'].includes(e.status)).length,
@@ -561,11 +653,30 @@ financeRouter.get('/dashboard', async (req, res) => {
       totalRevenueFcfa,
       pendingBalanceFcfa,
     },
+    todayFlow: {
+      totalScheduled: totalScheduledToday,
+      planned: todayConfirmed.length + todayUnconfirmed.length,
+      confirmed: todayConfirmed.length,
+      unconfirmed: todayUnconfirmed.length,
+      arrived: todayArrived.length,
+      waiting: todayWaitingConsult.length,
+      inConsultation: todayInConsult.length,
+      completed: todayCompleted.length,
+      absent: todayAbsent.length,
+      cancelled: todayCancelled.length,
+      urgentCount: todayUrgentCount,
+      completionRate: completionRateToday,
+      attendanceRate: attendanceRateToday,
+      avgWaitMinutes,
+      hourlyBreakdown,
+      byType: todayByType,
+    },
     charts: {
       last7Days,
       examsByCategory,
     },
     lists: {
+      todayAppointments: sortedTodayAppts.slice(0, 40),
       recentPatients: activePatients.slice(0, 5),
       priorityFollowUps: [...overdueFollowUps, ...todayFollowUps].slice(0, 6),
       patientsToCallToday: patientsToCallToday.slice(0, 8),

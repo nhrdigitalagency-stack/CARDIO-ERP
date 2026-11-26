@@ -21,6 +21,7 @@ import {
   FilePlus2,
   HeartPulse,
   PhoneCall,
+  RefreshCw,
   Stethoscope,
   UserPlus,
   Users,
@@ -59,8 +60,34 @@ interface ControlToScheduleItem {
   assigneeName?: string;
 }
 
+interface TodayFlowStats {
+  totalScheduled: number;
+  planned: number;
+  confirmed: number;
+  unconfirmed: number;
+  arrived: number;
+  waiting: number;
+  inConsultation: number;
+  completed: number;
+  absent: number;
+  cancelled: number;
+  urgentCount: number;
+  completionRate: number;
+  attendanceRate: number;
+  avgWaitMinutes: number | null;
+  hourlyBreakdown: Array<{
+    hour: string;
+    total: number;
+    completed: number;
+    active: number;
+    remaining: number;
+  }>;
+  byType: Array<{ type: string; label: string; count: number }>;
+}
+
 interface DashboardData {
   today: string;
+  syncedAt?: string;
   primaryRole: 'MEDECIN' | 'ADMIN' | 'ACCUEIL';
   metrics: {
     totalPatients: number;
@@ -90,11 +117,13 @@ interface DashboardData {
     totalRevenueFcfa: number;
     pendingBalanceFcfa: number;
   };
+  todayFlow?: TodayFlowStats;
   charts: {
     last7Days: Array<{ date: string; label: string; consultations: number; appointments: number }>;
     examsByCategory: Array<{ name: string; value: number }>;
   };
   lists: {
+    todayAppointments?: Appointment[];
     recentPatients: Patient[];
     priorityFollowUps: FollowUp[];
     patientsToCallToday: FollowUp[];
@@ -107,6 +136,8 @@ interface DashboardData {
   };
 }
 
+type TodayFlowFilter = 'ALL' | 'PLANNED' | 'WAITING' | 'IN_CONSULT' | 'COMPLETED' | 'ABSENT';
+
 interface DashboardPageProps {
   user: PublicUser;
   onNavigate: (module: NavModuleId, patientId?: string) => void;
@@ -117,10 +148,13 @@ const BAR_COLORS = ['#073B70', '#1265A3', '#2B7CB8', '#4F95C9', '#D71920', '#647
 export const DashboardPage: React.FC<DashboardPageProps> = ({ user, onNavigate }) => {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [todayFilter, setTodayFilter] = useState<TodayFlowFilter>('ALL');
 
   const load = async (silent = false) => {
     if (!silent) setLoading(true);
+    else setRefreshing(true);
     setError('');
     try {
       const res = await apiFetch<DashboardData>('/api/dashboard');
@@ -129,6 +163,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ user, onNavigate }
       if (!silent) setError(err.message || 'Impossible de charger le tableau de bord.');
     } finally {
       if (!silent) setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -173,6 +208,45 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ user, onNavigate }
   const overdueFollowUps = data.lists.overdueFollowUps || [];
   const unvalidatedExams = data.lists.unvalidatedExams || [];
   const controlsToSchedule = data.lists.controlsToSchedule || [];
+  const todayAppointments = data.lists.todayAppointments || [];
+  const flow: TodayFlowStats = data.todayFlow || {
+    totalScheduled: m.appointmentsToday,
+    planned: m.appointmentsConfirmed + m.appointmentsUnconfirmed,
+    confirmed: m.appointmentsConfirmed,
+    unconfirmed: m.appointmentsUnconfirmed,
+    arrived: m.patientsArrived,
+    waiting: Math.max(0, m.patientsWaiting - m.patientsArrived),
+    inConsultation: m.patientsInConsultation,
+    completed: 0,
+    absent: m.appointmentsAbsent,
+    cancelled: 0,
+    urgentCount: 0,
+    completionRate: 0,
+    attendanceRate: 0,
+    avgWaitMinutes: null,
+    hourlyBreakdown: [],
+    byType: [],
+  };
+
+  const waitingTotal = flow.arrived + flow.waiting;
+  const filteredTodayAppointments = todayAppointments.filter((a) => {
+    if (todayFilter === 'ALL') return a.status !== 'ANNULE';
+    if (todayFilter === 'PLANNED') return a.status === 'CONFIRME' || a.status === 'EN_ATTENTE';
+    if (todayFilter === 'WAITING') return a.status === 'PATIENT_ARRIVE' || a.status === 'EN_ATTENTE_CONSULTATION';
+    if (todayFilter === 'IN_CONSULT') return a.status === 'EN_CONSULTATION';
+    if (todayFilter === 'COMPLETED') return a.status === 'TERMINE';
+    if (todayFilter === 'ABSENT') return a.status === 'ABSENT' || a.status === 'ANNULE';
+    return true;
+  });
+
+  const syncedTimeLabel = data.syncedAt
+    ? new Date(data.syncedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : null;
+
+  const hasHourlyData = flow.hourlyBreakdown.some((h) => h.total > 0);
+  const completedPct = flow.totalScheduled ? Math.round((flow.completed / flow.totalScheduled) * 100) : 0;
+  const inConsultPct = flow.totalScheduled ? Math.round((flow.inConsultation / flow.totalScheduled) * 100) : 0;
+  const waitingPct = flow.totalScheduled ? Math.round((waitingTotal / flow.totalScheduled) * 100) : 0;
 
   const totalAlerts = m.followUpsOverdue + m.overdueTasks;
 
@@ -347,6 +421,355 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ user, onNavigate }
           <StatCard label="Retards suivis / tâches" value={m.followUpsOverdue + m.overdueTasks} subtext={`${m.openTasks} tâches ouvertes`} icon={<AlertTriangle className="w-4 h-4" />} tone={m.followUpsOverdue + m.overdueTasks > 0 ? 'danger' : 'success'} onClick={() => onNavigate('tasks')} />
         </div>
       )}
+
+      {/* Real-Time Patient Flow & Today's Appointments (Supabase Live) */}
+      <section
+        aria-label="Flux des patients et rendez-vous du jour en temps réel"
+        className="bg-white dark:bg-[#131E30] border border-slate-200/90 dark:border-slate-800 rounded-xl overflow-hidden"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-[#073B70] dark:text-white font-display">
+              Flux patients & Rendez-vous du jour
+            </h2>
+            <p className="text-xs text-[#708197] dark:text-slate-400 mt-0.5 tabular-nums">
+              {formatDateFr(data.today)}
+              {syncedTimeLabel ? ` · Synchronisé Supabase à ${syncedTimeLabel}` : ''}
+              {flow.avgWaitMinutes !== null ? ` · Attente moyenne : ${flow.avgWaitMinutes} min` : ''}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => load(true)}
+              disabled={refreshing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-[#172B45] dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-[#1265A3] ${refreshing ? 'animate-spin' : ''}`} />
+              Actualiser
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('queue')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white text-xs font-medium whitespace-nowrap"
+            >
+              File d'attente
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* 5-Stage Interactive Patient Flow Strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 dark:divide-slate-800 border-b border-slate-200 dark:border-slate-800">
+          {(
+            [
+              {
+                key: 'PLANNED' as TodayFlowFilter,
+                label: 'Prévus aujourd’hui',
+                value: flow.planned,
+                sub: `${flow.confirmed} confirmé(s) · ${flow.unconfirmed} en attente`,
+                accent: 'text-[#073B70] dark:text-sky-300',
+              },
+              {
+                key: 'WAITING' as TodayFlowFilter,
+                label: 'Arrivés / Attente',
+                value: waitingTotal,
+                sub: flow.avgWaitMinutes !== null ? `Attente moy. ${flow.avgWaitMinutes} min` : `${flow.arrived} arrivé(s) · ${flow.waiting} en salle`,
+                accent: waitingTotal > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-[#172B45] dark:text-slate-200',
+              },
+              {
+                key: 'IN_CONSULT' as TodayFlowFilter,
+                label: 'En consultation',
+                value: flow.inConsultation,
+                sub: flow.urgentCount > 0 ? `${flow.urgentCount} prioritaire(s) actif(s)` : 'Prise en charge en cours',
+                accent: 'text-[#1265A3] dark:text-sky-400',
+              },
+              {
+                key: 'COMPLETED' as TodayFlowFilter,
+                label: 'Terminés',
+                value: flow.completed,
+                sub: `Réalisation : ${flow.completionRate}%`,
+                accent: 'text-emerald-700 dark:text-emerald-400',
+              },
+              {
+                key: 'ABSENT' as TodayFlowFilter,
+                label: 'Absents / Annulés',
+                value: flow.absent + flow.cancelled,
+                sub: `${flow.absent} absent(s) · ${flow.cancelled} annulé(s)`,
+                accent: flow.absent > 0 ? 'text-[#D71920] dark:text-red-400' : 'text-[#708197] dark:text-slate-400',
+              },
+            ] as const
+          ).map((stage) => {
+            const active = todayFilter === stage.key;
+            return (
+              <button
+                key={stage.key}
+                type="button"
+                onClick={() => setTodayFilter((prev) => (prev === stage.key ? 'ALL' : stage.key))}
+                className={`text-left px-4 py-3.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1265A3] ${
+                  active
+                    ? 'bg-[#EAF4FC]/70 dark:bg-[#073B70]/30'
+                    : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
+                }`}
+              >
+                <div className="text-xs font-medium text-[#708197] dark:text-slate-400">{stage.label}</div>
+                <div className={`text-2xl font-bold font-mono tabular-nums mt-1 ${stage.accent}`}>
+                  {stage.value}
+                </div>
+                <div className="text-[11px] text-[#708197] dark:text-slate-400 mt-0.5 truncate tabular-nums">
+                  {stage.sub}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Live Proportional Progression Bar */}
+        <div className="px-5 py-3 bg-[#F8FBFE] dark:bg-[#0F1827] border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex-1">
+            <div className="flex items-center justify-between text-[11px] text-[#708197] dark:text-slate-400 mb-1.5 tabular-nums">
+              <span>
+                Avancement du flux du jour ({flow.totalScheduled} rendez-vous actif{flow.totalScheduled > 1 ? 's' : ''})
+              </span>
+              <span>
+                Présence : {flow.attendanceRate}% · Terminés : {flow.completionRate}%
+              </span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden flex">
+              <div
+                style={{ width: `${completedPct}%` }}
+                className="bg-[#073B70] dark:bg-emerald-500 h-full transition-all duration-200"
+                title={`Terminés : ${flow.completed}`}
+              />
+              <div
+                style={{ width: `${inConsultPct}%` }}
+                className="bg-[#1265A3] dark:bg-sky-400 h-full transition-all duration-200"
+                title={`En consultation : ${flow.inConsultation}`}
+              />
+              <div
+                style={{ width: `${waitingPct}%` }}
+                className="bg-amber-500 h-full transition-all duration-200"
+                title={`Arrivés / Attente : ${waitingTotal}`}
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#708197] dark:text-slate-400 shrink-0 tabular-nums">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-[#073B70] dark:bg-emerald-500" />
+              Terminés ({flow.completed})
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-[#1265A3] dark:bg-sky-400" />
+              En cours ({flow.inConsultation})
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-amber-500" />
+              En attente ({waitingTotal})
+            </span>
+          </div>
+        </div>
+
+        {/* Split Live Agenda + Hourly Flow Chart */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 dark:divide-slate-800 items-stretch">
+          {/* Left 7 cols: Live Today Appointments Table */}
+          <div className="lg:col-span-7 flex flex-col">
+            <div className="px-5 py-3 border-b border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-[#172B45] dark:text-white">
+                Agenda du jour ({filteredTodayAppointments.length})
+              </div>
+              <div className="flex flex-wrap items-center gap-1 p-0.5 bg-slate-100 dark:bg-slate-800/80 rounded-lg">
+                {(
+                  [
+                    { id: 'ALL' as TodayFlowFilter, label: 'Tous' },
+                    { id: 'PLANNED' as TodayFlowFilter, label: 'À venir' },
+                    { id: 'WAITING' as TodayFlowFilter, label: 'Attente' },
+                    { id: 'IN_CONSULT' as TodayFlowFilter, label: 'En cours' },
+                    { id: 'COMPLETED' as TodayFlowFilter, label: 'Terminés' },
+                    { id: 'ABSENT' as TodayFlowFilter, label: 'Absents' },
+                  ] as const
+                ).map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setTodayFilter(f.id)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
+                      todayFilter === f.id
+                        ? 'bg-white dark:bg-slate-900 text-[#073B70] dark:text-sky-300 shadow-xs'
+                        : 'text-[#708197] hover:text-[#172B45] dark:hover:text-slate-200'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {filteredTodayAppointments.length === 0 ? (
+              <div className="p-8 flex-1 flex flex-col items-center justify-center text-center">
+                <CalendarCheck className="w-7 h-7 text-slate-300 dark:text-slate-600 mb-2" />
+                <div className="text-xs font-semibold text-[#172B45] dark:text-slate-200">
+                  {todayFilter === 'ALL'
+                    ? "Aucun rendez-vous programmé pour aujourd'hui"
+                    : 'Aucun rendez-vous dans cette étape du flux'}
+                </div>
+                <p className="text-xs text-[#708197] dark:text-slate-400 mt-1 max-w-sm">
+                  {todayFilter === 'ALL'
+                    ? 'Les rendez-vous créés pour la date du jour apparaîtront automatiquement ici en temps réel.'
+                    : 'Sélectionnez « Tous » pour afficher l’ensemble des rendez-vous de la journée.'}
+                </p>
+                {todayFilter === 'ALL' && hasPerm(user, 'appointments:write') && (
+                  <button
+                    type="button"
+                    onClick={() => navigate('/rendez-vous/nouveau')}
+                    className="mt-3 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white text-xs font-medium"
+                  >
+                    <CalendarPlus className="w-3.5 h-3.5" />
+                    Planifier un rendez-vous
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="overflow-x-auto flex-1">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-slate-50/80 dark:bg-slate-900/50 text-[#708197] border-b border-slate-100 dark:border-slate-800">
+                    <tr>
+                      <th className="px-4 py-2.5 font-medium">Heure</th>
+                      <th className="px-4 py-2.5 font-medium">Patient</th>
+                      <th className="px-4 py-2.5 font-medium">Acte / Motif</th>
+                      <th className="px-4 py-2.5 font-medium">Statut</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {filteredTodayAppointments.slice(0, 10).map((a) => (
+                      <tr key={a._id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40">
+                        <td className="px-4 py-2.5 font-mono tabular-nums whitespace-nowrap text-[#172B45] dark:text-slate-100 font-semibold">
+                          <div>{a.startTime}</div>
+                          {a.arrivedAt && (
+                            <div className="text-[10px] font-normal text-[#708197]">
+                              Arr. {new Date(a.arrivedAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => onNavigate('patients', a.patientNumber || a.patientId)}
+                            className="font-semibold text-[#073B70] dark:text-sky-300 hover:underline truncate block max-w-[170px] text-left"
+                          >
+                            {a.patientName}
+                          </button>
+                          <div className="text-[11px] text-[#708197] truncate max-w-[170px]">
+                            {a.doctorName || 'Cardiologue'}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <div className="text-[#172B45] dark:text-slate-200 truncate max-w-[160px]">
+                            {APPOINTMENT_TYPE_LABELS[a.type]}
+                          </div>
+                          {a.adminPriority === 'URGENCE_A_VALIDER' && (
+                            <div className="text-[10px] font-semibold text-[#D71920]">Urgence à valider</div>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">
+                          <StatusBadge
+                            label={APPOINTMENT_STATUS_LABELS[a.status]}
+                            tone={
+                              a.status === 'TERMINE'
+                                ? 'success'
+                                : a.status === 'EN_CONSULTATION' || a.status === 'CONFIRME'
+                                ? 'info'
+                                : a.status === 'PATIENT_ARRIVE' || a.status === 'EN_ATTENTE_CONSULTATION'
+                                ? 'warning'
+                                : a.status === 'ABSENT' || a.status === 'ANNULE'
+                                ? 'danger'
+                                : 'neutral'
+                            }
+                          />
+                        </td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/rendez-vous/${encodeURIComponent(a._id)}/modifier`)}
+                            className="text-[#1265A3] dark:text-sky-400 hover:underline font-medium"
+                          >
+                            Ouvrir
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Right 5 cols: Hourly Distribution Chart & Appointment Type Breakdown */}
+          <div className="lg:col-span-5 p-5 flex flex-col justify-between gap-5">
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-xs font-semibold text-[#172B45] dark:text-white">
+                    Charge horaire du jour (08h – 18h)
+                  </h3>
+                  <p className="text-[11px] text-[#708197] dark:text-slate-400">
+                    Répartition en direct par créneau horaire
+                  </p>
+                </div>
+                <span className="text-xs font-mono tabular-nums font-semibold text-[#073B70] dark:text-sky-300">
+                  {flow.totalScheduled} RDV
+                </span>
+              </div>
+
+              {!hasHourlyData ? (
+                <div className="h-44 flex items-center justify-center text-xs text-[#708197] border border-dashed border-slate-200 dark:border-slate-800 rounded-lg">
+                  Aucun créneau occupé aujourd’hui.
+                </div>
+              ) : (
+                <div className="h-44 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={flow.hourlyBreakdown} margin={{ top: 6, right: 4, left: -24, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                      <XAxis dataKey="hour" tick={{ fontSize: 10, fill: '#708197' }} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#708197' }} />
+                      <Tooltip
+                        contentStyle={{
+                          borderRadius: '8px',
+                          border: '1px solid #E2E8F0',
+                          fontSize: '12px',
+                        }}
+                      />
+                      <Bar dataKey="completed" stackId="a" name="Terminés" fill="#073B70" />
+                      <Bar dataKey="active" stackId="a" name="Arrivés / En cours" fill="#D97706" />
+                      <Bar dataKey="remaining" stackId="a" name="À venir" fill="#1265A3" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
+              <div className="text-xs font-semibold text-[#172B45] dark:text-white mb-2">
+                Répartition des rendez-vous du jour par type
+              </div>
+              {flow.byType.length === 0 ? (
+                <div className="text-xs text-[#708197]">Aucune prestation programmée ce jour.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {flow.byType.slice(0, 5).map((item) => (
+                    <div key={item.type} className="flex items-center justify-between text-xs">
+                      <span className="text-[#172B45] dark:text-slate-200 truncate pr-2">{item.label}</span>
+                      <span className="font-mono tabular-nums font-semibold text-[#073B70] dark:text-sky-300 shrink-0">
+                        {item.count}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
 
       {/* Coordination Center: 4 Explicit Operational Cards */}
       <div className="space-y-3">
