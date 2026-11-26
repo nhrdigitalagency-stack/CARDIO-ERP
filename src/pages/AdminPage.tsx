@@ -17,7 +17,6 @@ import {
   Users,
 } from 'lucide-react';
 import {
-  ConfirmModal,
   Modal,
   StatusBadge,
   TableSkeleton,
@@ -36,20 +35,20 @@ import { apiFetch, formatDateTimeFr, getAuthHeaders, hasPerm } from '../lib/api'
 import { buildQuerySuffix, navigate, useAppRoute } from '../lib/router';
 import { useLiveSync } from '../lib/useLiveSync';
 
-type AdminTab = 'users' | 'settings' | 'audit' | 'demo';
+type AdminTab = 'users' | 'settings' | 'audit' | 'backup';
 
 const TAB_TO_SLUG: Record<AdminTab, string> = {
   users: 'utilisateurs',
   settings: 'parametres',
   audit: 'audit',
-  demo: 'demonstration',
+  backup: 'sauvegarde',
 };
 
 const SLUG_TO_TAB: Record<string, AdminTab> = {
   utilisateurs: 'users',
   parametres: 'settings',
   audit: 'audit',
-  demonstration: 'demo',
+  sauvegarde: 'backup',
 };
 
 export const AdminPage: React.FC<{
@@ -71,14 +70,13 @@ export const AdminPage: React.FC<{
   const requestedTab: AdminTab = SLUG_TO_TAB[seg1] || defaultTab;
   const tab: AdminTab = (() => {
     if (requestedTab === 'users' && !hasPerm(user, 'users:manage')) return defaultTab;
-    if ((requestedTab === 'settings' || requestedTab === 'demo') && !hasPerm(user, 'settings:manage')) return defaultTab;
+    if ((requestedTab === 'settings' || requestedTab === 'backup') && !hasPerm(user, 'settings:manage')) return defaultTab;
     if (requestedTab === 'audit' && !hasPerm(user, 'audit:read')) return defaultTab;
     return requestedTab;
   })();
 
   const isCreateUserUrl = isRoot && seg1 === 'utilisateurs' && seg2 === 'nouveau';
   const urlEditUserId = isRoot && seg1 === 'utilisateurs' && seg2 && seg2 !== 'nouveau' && seg3 === 'modifier' ? seg2 : null;
-  const isResetDemoUrl = isRoot && seg1 === 'demonstration' && seg2 === 'reinitialiser';
   const severityFilter = route.query.get('gravite') || 'ALL';
 
   const [users, setUsers] = useState<PublicUser[]>([]);
@@ -118,7 +116,6 @@ export const AdminPage: React.FC<{
     resetPassword: '',
   });
 
-  const [resetting, setResetting] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [exportingAudit, setExportingAudit] = useState(false);
 
@@ -158,7 +155,7 @@ export const AdminPage: React.FC<{
 
   useLiveSync(['user', 'settings', 'audit', 'notification'], () => load(true));
 
-  // Sync URL -> create user, edit user, reset demo modals & canonical tab redirect
+  // Sync URL -> create user, edit user modals & canonical tab redirect
   useEffect(() => {
     if (!isRoot) return;
     if (tab !== requestedTab || !seg1) {
@@ -199,13 +196,8 @@ export const AdminPage: React.FC<{
       return;
     }
 
-    if (isResetDemoUrl && !hasPerm(user, 'settings:manage')) {
-      navigate(`/administration/${TAB_TO_SLUG[defaultTab]}`, { replace: true });
-      return;
-    }
-
     setEditTarget(null);
-  }, [isRoot, seg1, tab, requestedTab, isCreateUserUrl, urlEditUserId, isResetDemoUrl, users, loading]);
+  }, [isRoot, seg1, tab, requestedTab, isCreateUserUrl, urlEditUserId, users, loading]);
 
   const handleDownloadBackup = async () => {
     setBackingUp(true);
@@ -396,20 +388,6 @@ export const AdminPage: React.FC<{
     }
   };
 
-  const handleResetDemo = async () => {
-    setResetting(true);
-    try {
-      await apiFetch('/api/system/reset-demo', { method: 'POST' });
-      notify('success', 'Données de démonstration réinitialisées sans toucher aux données de production.');
-      navigate('/administration/demonstration');
-      await load();
-    } catch (err: any) {
-      notify('error', err.message);
-    } finally {
-      setResetting(false);
-    }
-  };
-
   const handleSendTestEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!testEmailTo.trim()) return;
@@ -507,8 +485,8 @@ export const AdminPage: React.FC<{
           </button>
         )}
         {hasPerm(user, 'settings:manage') && (
-          <button type="button" onClick={() => setTab('demo')} className={`px-3 py-1.5 rounded-md text-xs font-medium ${tab === 'demo' ? 'bg-white dark:bg-slate-900 text-[#073B70] dark:text-sky-300 shadow-xs' : 'text-[#708197]'}`}>
-            Environnement Démo
+          <button type="button" onClick={() => setTab('backup')} className={`px-3 py-1.5 rounded-md text-xs font-medium ${tab === 'backup' ? 'bg-white dark:bg-slate-900 text-[#073B70] dark:text-sky-300 shadow-xs' : 'text-[#708197]'}`}>
+            Sauvegarde & Export
           </button>
         )}
       </div>
@@ -1002,26 +980,6 @@ export const AdminPage: React.FC<{
               {backingUp ? 'Préparation de la sauvegarde...' : 'Télécharger sauvegarde (JSON)'}
             </button>
           </div>
-
-          <div className="bg-white dark:bg-[#131E30] border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
-            <div className="flex items-start gap-3">
-              <Database className="w-5 h-5 text-[#D71920] shrink-0 mt-0.5" />
-              <div>
-                <h2 className="text-base font-bold">Réinitialiser les données fictives de démonstration</h2>
-                <p className="text-sm text-[#708197] mt-1 max-w-2xl">
-                  Cette action supprime uniquement les documents marqués comme démonstration (<code className="font-mono text-xs">isDemo == true</code>) et recrée les 3 comptes employés fictifs, 5 patients fictifs, 5 rendez-vous, 3 consultations, 5 examens, 4 suivis et 5 tâches. Vos données réelles de production et le journal d'audit sont intégralement préservés.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => navigate('/administration/demonstration/reinitialiser')}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[#D71920] hover:bg-red-700 text-white text-sm font-medium"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Réinitialiser l'environnement de démonstration
-            </button>
-          </div>
         </div>
       )}
 
@@ -1146,17 +1104,6 @@ export const AdminPage: React.FC<{
           </div>
         </form>
       </Modal>
-
-      <ConfirmModal
-        open={isResetDemoUrl}
-        title="Réinitialiser les données de démonstration ?"
-        message="Tous les enregistrements marqués comme démonstration seront remplacés par le jeu de données fictives initial. Vos dossiers de production resteront intacts."
-        confirmLabel="Réinitialiser"
-        danger
-        loading={resetting}
-        onConfirm={handleResetDemo}
-        onCancel={() => navigate('/administration/demonstration')}
-      />
     </div>
   );
 };

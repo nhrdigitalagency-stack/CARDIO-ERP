@@ -25,29 +25,6 @@ interface LoginPageProps {
   notify: (type: 'success' | 'error' | 'info', text: string) => void;
 }
 
-const DEMO_ACCOUNTS = [
-  {
-    label: 'Médecin + Admin (Démo)',
-    identifier: 'medecin.demo@cardio-erp.test',
-    desc: 'Dr Paulin MBAPPE [Démo]',
-  },
-  {
-    label: 'Accueil / Secrétariat (Démo)',
-    identifier: 'accueil.demo@cardio-erp.test',
-    desc: 'Mme Clarisse NGONO [Démo]',
-  },
-  {
-    label: 'Administrateur (Démo)',
-    identifier: 'admin.demo@cardio-erp.test',
-    desc: 'M. Hervé KOUAM [Démo]',
-  },
-  {
-    label: 'Portail Patient (Démo)',
-    identifier: 'patient.demo@cardio-erp.test',
-    desc: 'Jean-Baptiste NDONGO [Démo]',
-  },
-];
-
 export const LoginPage: React.FC<LoginPageProps> = ({
   systemStatus,
   onLoginSuccess,
@@ -62,7 +39,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [seeding, setSeeding] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const [adminForm, setAdminForm] = useState({
+    title: 'Dr',
+    firstName: '',
+    lastName: '',
+    email: '',
+    username: '',
+    password: '',
+  });
 
   const forgotOpen = route.pathname === '/login/mot-de-passe-oublie';
   const [forgotEmail, setForgotEmail] = useState('');
@@ -97,17 +82,23 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   };
 
-  const handleBootstrapDemo = async () => {
-    setSeeding(true);
+  const handleBootstrapAdmin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBootstrapping(true);
     setError('');
     try {
-      await apiFetch('/api/system/bootstrap-demo', { method: 'POST' });
-      notify('success', 'Environnement fictif de démonstration initialisé dans Supabase.');
+      const res = await apiFetch<{ ok: boolean; email: string; username: string }>('/api/system/bootstrap-admin', {
+        method: 'POST',
+        body: JSON.stringify(adminForm),
+      });
+      notify('success', 'Compte administrateur initial créé avec succès. Connectez-vous pour démarrer.');
+      setIdentifier(res.email || adminForm.email);
+      setPassword('');
       await onSystemRefresh();
     } catch (err: any) {
-      notify('error', err.message || "Impossible d'initialiser la démonstration.");
+      setError(err.message || "Impossible de créer le compte administrateur initial.");
     } finally {
-      setSeeding(false);
+      setBootstrapping(false);
     }
   };
 
@@ -197,34 +188,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         <div className="lg:col-span-7 bg-white dark:bg-[#131E30] border border-slate-200 dark:border-slate-800 rounded-2xl p-8 flex flex-col justify-center">
           <div>
             <h2 className="text-2xl font-bold text-[#172B45] dark:text-white">
-              Connexion sécurisée
+              {!systemStatus.hasAnyUsers ? 'Configuration du compte administrateur' : 'Connexion sécurisée'}
             </h2>
             <p className="text-sm text-[#708197] dark:text-slate-400 mt-1">
-              Accédez à votre espace professionnel ou portail patient.
+              {!systemStatus.hasAnyUsers
+                ? 'Créez le premier compte direction / médecin administrateur pour initialiser le cabinet.'
+                : 'Accédez à votre espace professionnel ou portail patient.'}
             </p>
           </div>
-
-          {!systemStatus.hasAnyUsers && (
-            <div className="mt-6 p-4 rounded-xl bg-[#EAF4FC] dark:bg-[#073B70]/35 border border-[#1265A3]/30 space-y-3">
-              <div className="flex items-start gap-3">
-                <Database className="w-5 h-5 text-[#073B70] dark:text-sky-300 shrink-0 mt-0.5" />
-                <div className="text-sm text-[#073B70] dark:text-sky-100">
-                  <div className="font-semibold">Base Supabase prête — Aucun utilisateur enregistré</div>
-                  <p className="text-xs mt-0.5 opacity-90">
-                    Initialisez les comptes fictifs de démonstration (Administrateur, Médecin, Secrétaire, Patient) pour tester l’application immédiatement.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleBootstrapDemo}
-                disabled={seeding}
-                className="w-full py-2.5 px-4 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white text-sm font-medium transition-colors disabled:opacity-60"
-              >
-                {seeding ? 'Initialisation dans Supabase...' : 'Initialiser les données fictives de démonstration'}
-              </button>
-            </div>
-          )}
 
           {error && (
             <div className="mt-5 p-3.5 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 flex items-center gap-2.5 text-sm text-[#D71920] dark:text-red-300">
@@ -233,111 +204,175 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[#172B45] dark:text-slate-200 mb-1.5">
-                Nom d’utilisateur ou adresse e-mail
-              </label>
-              <div className="relative">
-                <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          {!systemStatus.hasAnyUsers ? (
+            <form onSubmit={handleBootstrapAdmin} className="mt-6 space-y-4">
+              <div className="p-3.5 rounded-xl bg-[#EAF4FC] dark:bg-[#073B70]/35 border border-[#1265A3]/30 flex items-start gap-3">
+                <Database className="w-5 h-5 text-[#073B70] dark:text-sky-300 shrink-0 mt-0.5" />
+                <div className="text-xs text-[#073B70] dark:text-sky-100">
+                  <div className="font-semibold">Base Supabase connectée — Première mise en service</div>
+                  <p className="mt-0.5 opacity-90">
+                    Ce formulaire n'est accessible qu'une seule fois. Dès ce compte créé, la gestion des autres comptes se fait depuis l'espace Administration.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium mb-1">Titre</label>
+                  <input
+                    type="text"
+                    value={adminForm.title}
+                    onChange={(e) => setAdminForm({ ...adminForm, title: e.target.value })}
+                    placeholder="Dr"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Prénom *</label>
+                  <input
+                    type="text"
+                    required
+                    value={adminForm.firstName}
+                    onChange={(e) => setAdminForm({ ...adminForm, firstName: e.target.value })}
+                    placeholder="Paulin"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Nom *</label>
+                  <input
+                    type="text"
+                    required
+                    value={adminForm.lastName}
+                    onChange={(e) => setAdminForm({ ...adminForm, lastName: e.target.value })}
+                    placeholder="MBAPPE"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium mb-1">Adresse e-mail professionnelle *</label>
+                  <input
+                    type="email"
+                    required
+                    value={adminForm.email}
+                    onChange={(e) => setAdminForm({ ...adminForm, email: e.target.value })}
+                    placeholder="direction@cardiologie-paris16.cm"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Identifiant de connexion *</label>
+                  <input
+                    type="text"
+                    required
+                    value={adminForm.username}
+                    onChange={(e) => setAdminForm({ ...adminForm, username: e.target.value })}
+                    placeholder="dr.mbappe"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1">Mot de passe (minimum 8 caractères) *</label>
                 <input
-                  type="text"
+                  type="password"
                   required
-                  value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="ex. medecin.demo ou medecin.demo@cardio-erp.test"
-                  className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-[#172B45] dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#1265A3]"
+                  minLength={8}
+                  value={adminForm.password}
+                  onChange={(e) => setAdminForm({ ...adminForm, password: e.target.value })}
+                  placeholder="Choisissez un mot de passe robuste"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
                 />
               </div>
-            </div>
 
-            <div>
-              <label className="block text-sm font-medium text-[#172B45] dark:text-slate-200 mb-1.5">
-                Mot de passe
-              </label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••••••"
-                  className="w-full pl-10 pr-11 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-[#172B45] dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#1265A3]"
-                />
+              <button
+                type="submit"
+                disabled={bootstrapping}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white font-medium text-sm transition-colors disabled:opacity-50"
+              >
+                {bootstrapping ? 'Initialisation en cours...' : 'Créer le compte administrateur initial'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[#172B45] dark:text-slate-200 mb-1.5">
+                  Nom d’utilisateur ou adresse e-mail
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    placeholder="ex. dr.mbappe ou direction@cardiologie-paris16.cm"
+                    className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-[#172B45] dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#1265A3]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[#172B45] dark:text-slate-200 mb-1.5">
+                  Mot de passe
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full pl-10 pr-11 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-[#172B45] dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#1265A3]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1"
+                    aria-label={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-xs pt-1">
                 <button
                   type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1"
-                  aria-label={showPassword ? 'Masquer le mot de passe' : 'Afficher le mot de passe'}
+                  onClick={() => navigate('/login/mot-de-passe-oublie')}
+                  className="text-[#1265A3] dark:text-sky-400 hover:underline font-medium"
                 >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  Mot de passe oublié ?
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate('/login/activation-patient')}
+                  className="inline-flex items-center gap-1 text-[#073B70] dark:text-sky-300 hover:underline font-medium"
+                >
+                  <UserCheck className="w-3.5 h-3.5" />
+                  Activer mon espace patient
                 </button>
               </div>
-            </div>
 
-            <div className="flex items-center justify-between text-xs pt-1">
               <button
-                type="button"
-                onClick={() => navigate('/login/mot-de-passe-oublie')}
-                className="text-[#1265A3] dark:text-sky-400 hover:underline font-medium"
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white font-medium text-sm transition-colors disabled:opacity-50"
               >
-                Mot de passe oublié ?
+                {loading ? 'Authentification en cours...' : 'Se connecter à CARDIO ERP'}
               </button>
-              <button
-                type="button"
-                onClick={() => navigate('/login/activation-patient')}
-                className="inline-flex items-center gap-1 text-[#073B70] dark:text-sky-300 hover:underline font-medium"
-              >
-                <UserCheck className="w-3.5 h-3.5" />
-                Activer mon espace patient
-              </button>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading || !systemStatus.hasAnyUsers}
-              className="w-full py-2.5 px-4 rounded-lg bg-[#073B70] hover:bg-[#1265A3] text-white font-medium text-sm transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Authentification en cours...' : 'Se connecter à CARDIO ERP'}
-            </button>
-          </form>
-
-          {systemStatus.hasDemoData && (
-            <div className="mt-7 pt-6 border-t border-slate-200 dark:border-slate-800">
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="text-xs font-semibold text-[#708197] dark:text-slate-400">
-                  Comptes fictifs de démonstration (mot de passe : <code className="font-mono">CardioDemo2026!</code>)
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {DEMO_ACCOUNTS.map((acc) => (
-                  <button
-                    key={acc.identifier}
-                    type="button"
-                    onClick={() => {
-                      setIdentifier(acc.identifier);
-                      setPassword('CardioDemo2026!');
-                      setError('');
-                    }}
-                    className="text-left px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-[#1265A3] hover:bg-[#EAF4FC]/50 dark:hover:bg-slate-800/70 transition-colors"
-                  >
-                    <div className="text-xs font-semibold text-[#073B70] dark:text-sky-300">
-                      {acc.label}
-                    </div>
-                    <div className="text-[11px] text-[#708197] dark:text-slate-400 truncate">
-                      {acc.desc}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
+            </form>
           )}
         </div>
       </div>
 
       <footer className="max-w-5xl w-full mx-auto text-center text-xs text-[#708197] dark:text-slate-500">
-        CARDIO ERP · {CLINIC_DEFAULTS.clinicName} · Version de démonstration sur données fictives
+        CARDIO ERP · {CLINIC_DEFAULTS.clinicName} · Plateforme de gestion cardiologique sécurisée
       </footer>
 
       <Modal

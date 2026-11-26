@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { z } from 'zod';
 import {
   getEnvConfig,
   getMissingEnvVars,
@@ -11,20 +12,32 @@ import {
 } from '../config/env';
 import { repository } from '../repositories/SupabaseRepository';
 import { testR2Connection } from '../services/r2Storage';
-import { seedDemoEnvironment } from '../services/demoSeed';
-import {
-  logAuditSafe,
-  requireAuth,
-  requireCsrf,
-  requirePermission,
-  requireSupabaseConfigured,
-} from '../middleware/auth';
+import { ensureClinicBaseline } from '../services/clinicBootstrap';
+import { hashPassword } from '../services/security';
+import { logAuditSafe, requireSupabaseConfigured } from '../middleware/auth';
 import type { SystemStatusResponse } from '../../src/shared/types';
 import { emitSyncEvent } from '../services/eventBus';
 import { startSupabaseRealtime } from '../services/supabaseRealtime';
 import { getLastReminderRunAt, startReminderScheduler } from '../services/reminderScheduler';
 
 export const systemRouter = Router();
+
+let bootstrapAdminInFlight = false;
+
+const bootstrapAdminSchema = z.object({
+  title: z.string().trim().max(30).optional(),
+  firstName: z.string().trim().min(2, 'Prénom requis (min. 2 caractères)').max(80),
+  lastName: z.string().trim().min(2, 'Nom requis (min. 2 caractères)').max(80),
+  email: z.string().trim().email('Adresse e-mail invalide').max(160),
+  username: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9._-]{3,40}$/, 'Identifiant invalide (3-40 caractères, lettres/chiffres/._-)'),
+  phone: z.string().trim().max(40).optional(),
+  specialty: z.string().trim().max(100).optional(),
+  password: z.string().min(8, 'Le mot de passe doit contenir au moins 8 caractères.').max(128),
+});
 
 systemRouter.get('/status', async (_req, res) => {
   const cfg = getEnvConfig();
@@ -109,7 +122,7 @@ systemRouter.post('/test-connections', async (_req, res) => {
   }
 
   const ok = Boolean(supabaseResult.ok && supabaseResult.schemaReady);
-  return res.status(ok ? 200 : 200).json({
+  return res.status(200).json({
     ok,
     hasAnyUsers,
     supabase: supabaseResult,
@@ -141,46 +154,63 @@ systemRouter.get('/schema-sql', async (_req, res) => {
   }
 });
 
-// Initial bootstrap seed allowed ONLY when no users exist yet in Supabase
-systemRouter.post('/bootstrap-demo', requireSupabaseConfigured, async (req, res) => {
+// One-time initial administrator setup — permanently locked once any user exists in Supabase
+systemRouter.post('/bootstrap-admin', requireSupabaseConfigured, async (req, res) => {
+  if (bootstrapAdminInFlight) {
+    return res.status(409).json({ error: 'Initialisation déjà en cours.' });
+  }
+  bootstrapAdminInFlight = true;
   try {
     const anyUsers = await repository.hasAnyUsers();
     if (anyUsers) {
       return res.status(403).json({
-        error: 'Des utilisateurs existent déjà. Connectez-vous en administrateur pour réinitialiser la démonstration.',
+        error: 'Un compte administrateur existe déjà. Connectez-vous pour gérer les utilisateurs.',
       });
     }
-    const result = await seedDemoEnvironment('Initialisation initiale');
-    await logAuditSafe(req, 'DEMO_SEED', 'system', 'demo', 'INFO', 'Initialisation initiale des données de démonstration');
+
+    const parsed = bootstrapAdminSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Données invalides.' });
+    }
+
+    const data = parsed.data;
+    const now = new Date().toISOString();
+    await ensureClinicBaseline();
+    const passwordHash = await hashPassword(data.password);
+
+    const adminUser = await repository.createUser({
+      email: data.email.toLowerCase(),
+      username: data.username,
+      firstName: data.firstName,
+      lastName: data.lastName,
+      title: data.title || 'Dr',
+      specialty: data.specialty || 'Cardiologie & Direction médicale',
+      phone: data.phone || undefined,
+      roles: ['ADMIN', 'MEDECIN'],
+      isActive: true,
+      isDemo: false,
+      passwordHash,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await logAuditSafe(
+      req,
+      'ADMIN_BOOTSTRAP',
+      'user',
+      adminUser._id,
+      'SECURITY',
+      `Création initiale du compte administrateur (${adminUser.username})`
+    );
     emitSyncEvent('system');
-    return res.json({ ok: true, ...result });
+    return res.status(201).json({
+      ok: true,
+      username: adminUser.username,
+      email: adminUser.email,
+    });
   } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Erreur lors de l’initialisation Supabase.' });
+    return res.status(500).json({ error: err?.message || "Erreur lors de l'initialisation du compte administrateur." });
+  } finally {
+    bootstrapAdminInFlight = false;
   }
 });
-
-// Admin-protected demo reset (preserves non-demo production records & audit logs)
-systemRouter.post(
-  '/reset-demo',
-  requireSupabaseConfigured,
-  requireAuth,
-  requireCsrf,
-  requirePermission('settings:manage'),
-  async (req, res) => {
-    try {
-      const result = await seedDemoEnvironment(`${req.user!.firstName} ${req.user!.lastName}`);
-      await logAuditSafe(
-        req,
-        'DEMO_RESET',
-        'system',
-        'demo',
-        'WARNING',
-        'Réinitialisation des données fictives de démonstration'
-      );
-      emitSyncEvent('system');
-      return res.json({ ok: true, ...result });
-    } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Échec de réinitialisation de la démonstration.' });
-    }
-  }
-);
