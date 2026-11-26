@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+.aistudio/
+public/assets/aistudio/*
+!public/assets/aistudio/Capture_d__cran_2026-11-12_093834_f90e82fc.png
+private_uploads/
+server.js
+

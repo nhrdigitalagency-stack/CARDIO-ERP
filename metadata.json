@@ -1,0 +1,8 @@
+{
+  "name": "CARDIO ERP — Cabinet Médical de Cardiologie Paris 16",
+  "description": "Application de gestion médicale Full Stack (ERP) pour le Cabinet Médical de Cardiologie Paris 16 à Bonapriso, Douala : patients, rendez-vous, file d'attente, consultations, examens cardiologiques, suivis et administration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
